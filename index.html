@@ -178,7 +178,26 @@
             padding: 20px;
             border-radius: 10px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            max-width: 300px;
+            max-width: 350px;
+        }
+
+        .vtube-status {
+            margin: 10px 0;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .vtube-connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .vtube-disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
         }
 
         .api-input {
@@ -205,11 +224,30 @@
     <div class="container">
         <div class="pikachu-area">
             <div class="setup-panel" id="setupPanel">
-                <h3>API Setup</h3>
-                <input type="password" id="anthropicKey" class="api-input" placeholder="Anthropic API Key">
-                <input type="password" id="elevenlabsKey" class="api-input" placeholder="ElevenLabs API Key">
-                <button class="setup-button" onclick="saveKeys()">Save Keys</button>
-                <button class="setup-button" onclick="toggleSetup()">Hide Panel</button>
+                <h3>Setup</h3>
+                
+                <div style="margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">
+                    <strong>Step 1: VTube Studio</strong>
+                    <div class="vtube-status vtube-disconnected" id="vtubeStatus">
+                        VTube Studio: Not Connected
+                    </div>
+                    <button class="setup-button" onclick="connectVTubeStudio()" style="width: 100%;">Connect to VTube Studio</button>
+                    <div style="font-size: 11px; color: #666; margin-top: 5px;">
+                        • Open VTube Studio<br>
+                        • Load your pikachu.model3.json<br>
+                        • Enable API in settings (port 8001)<br>
+                        • Click Connect above
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 15px;">
+                    <strong>Step 2: API Keys</strong>
+                    <input type="password" id="anthropicKey" class="api-input" placeholder="Anthropic API Key">
+                    <input type="password" id="elevenlabsKey" class="api-input" placeholder="ElevenLabs API Key">
+                    <button class="setup-button" onclick="saveKeys()" style="width: 100%;">Save API Keys</button>
+                </div>
+                
+                <button class="setup-button" onclick="toggleSetup()" style="background: #6c757d;">Hide Panel</button>
             </div>
             
             <div class="status" id="status">Ready</div>
@@ -218,8 +256,8 @@
                 <div class="model-placeholder">⚡</div>
                 <div>Pikachu VTuber Model</div>
                 <div style="font-size: 14px; margin-top: 10px; text-align: center;">
-                    Model will be integrated here<br>
-                    Currently showing placeholder
+                    Model will be displayed in VTube Studio<br>
+                    Connect VTube Studio to enable animation
                 </div>
             </div>
         </div>
@@ -249,6 +287,9 @@
         let elevenlabsApiKey = '';
         let isProcessing = false;
         let currentAudio = null;
+        let vtubeSocket = null;
+        let vtubeConnected = false;
+        let currentModelId = null;
 
         // Load saved API keys
         window.addEventListener('load', () => {
@@ -262,9 +303,7 @@
                 document.getElementById('elevenlabsKey').value = '••••••••';
             }
             
-            if (anthropicApiKey && elevenlabsApiKey) {
-                document.getElementById('setupPanel').style.display = 'none';
-            }
+            // Don't auto-hide the setup panel - let user control it
         });
 
         function saveKeys() {
@@ -283,7 +322,6 @@
             
             if (anthropicApiKey && elevenlabsApiKey) {
                 alert('API keys saved successfully!');
-                document.getElementById('setupPanel').style.display = 'none';
             } else {
                 alert('Please enter both API keys');
             }
@@ -429,17 +467,268 @@
             }
         }
 
-        // Placeholder functions for VTuber model integration
-        function startLipSync() {
-            // This will be where we trigger the Live2D model lip sync
-            console.log('Starting lip sync animation');
-            // TODO: Integrate with Live2D model
+        // VTube Studio Integration
+        async function connectVTubeStudio() {
+            try {
+                updateVTubeStatus(false, 'Connecting...');
+                
+                vtubeSocket = new WebSocket('ws://localhost:8001');
+                
+                vtubeSocket.onopen = async () => {
+                    console.log('Connected to VTube Studio');
+                    
+                    try {
+                        // First, request authentication token
+                        const authResponse = await sendVTubeCommand({
+                            apiName: "VTubeStudioPublicAPI",
+                            apiVersion: "1.0",
+                            requestID: "auth_request",
+                            messageType: "AuthenticationTokenRequest",
+                            data: {
+                                pluginName: "Pikachu AI Chat",
+                                pluginDeveloper: "AI Assistant"
+                            }
+                        });
+                        
+                        if (authResponse && authResponse.data.authenticationToken) {
+                            // Store token and authenticate
+                            localStorage.setItem('vtubeToken', authResponse.data.authenticationToken);
+                            await authenticateWithVTube(authResponse.data.authenticationToken);
+                        }
+                    } catch (error) {
+                        console.error('Authentication error:', error);
+                        updateVTubeStatus(false, 'Authentication failed');
+                    }
+                };
+                
+                vtubeSocket.onerror = (error) => {
+                    console.error('VTube Studio connection error:', error);
+                    updateVTubeStatus(false, 'Connection failed');
+                };
+                
+                vtubeSocket.onclose = () => {
+                    console.log('VTube Studio connection closed');
+                    updateVTubeStatus(false, 'Disconnected');
+                };
+                
+            } catch (error) {
+                console.error('Failed to connect to VTube Studio:', error);
+                updateVTubeStatus(false, 'Failed to connect');
+                alert('Could not connect to VTube Studio. Make sure:\n• VTube Studio is running\n• API is enabled in settings\n• Port 8001 is available');
+            }
         }
 
-        function stopLipSync() {
-            // This will be where we stop the Live2D model lip sync
-            console.log('Stopping lip sync animation');
-            // TODO: Stop Live2D model animation
+        async function authenticateWithVTube(token) {
+            try {
+                const response = await sendVTubeCommand({
+                    apiName: "VTubeStudioPublicAPI",
+                    apiVersion: "1.0",
+                    requestID: "auth",
+                    messageType: "AuthenticationRequest",
+                    data: {
+                        pluginName: "Pikachu AI Chat",
+                        pluginDeveloper: "AI Assistant",
+                        authenticationToken: token
+                    }
+                });
+                
+                if (response && response.data.authenticated) {
+                    vtubeConnected = true;
+                    updateVTubeStatus(true, 'Connected ✓');
+                    
+                    // Get current model info
+                    const modelInfo = await sendVTubeCommand({
+                        apiName: "VTubeStudioPublicAPI",
+                        apiVersion: "1.0",
+                        requestID: "model_info",
+                        messageType: "CurrentModelRequest"
+                    });
+                    
+                    if (modelInfo && modelInfo.data.modelLoaded) {
+                        currentModelId = modelInfo.data.modelID;
+                        console.log('Current model:', modelInfo.data.modelName);
+                    }
+                } else {
+                    updateVTubeStatus(false, 'Authentication failed');
+                }
+            } catch (error) {
+                console.error('Authentication error:', error);
+                updateVTubeStatus(false, 'Authentication failed');
+            }
+        }
+
+        function sendVTubeCommand(command) {
+            return new Promise((resolve, reject) => {
+                if (!vtubeSocket || vtubeSocket.readyState !== WebSocket.OPEN) {
+                    reject(new Error('VTube Studio not connected'));
+                    return;
+                }
+                
+                const requestId = command.requestID;
+                const timeout = setTimeout(() => {
+                    reject(new Error('VTube Studio command timeout'));
+                }, 10000);
+                
+                const handler = (event) => {
+                    try {
+                        const response = JSON.parse(event.data);
+                        if (response.requestID === requestId) {
+                            clearTimeout(timeout);
+                            vtubeSocket.removeEventListener('message', handler);
+                            resolve(response);
+                        }
+                    } catch (error) {
+                        console.error('Failed to parse VTube Studio response:', error);
+                    }
+                };
+                
+                vtubeSocket.addEventListener('message', handler);
+                vtubeSocket.send(JSON.stringify(command));
+            });
+        }
+
+        function updateVTubeStatus(connected, message = null) {
+            const statusDiv = document.getElementById('vtubeStatus');
+            if (connected) {
+                statusDiv.textContent = message || 'VTube Studio: Connected ✓';
+                statusDiv.className = 'vtube-status vtube-connected';
+                vtubeConnected = true;
+            } else {
+                statusDiv.textContent = message || 'VTube Studio: Not Connected';
+                statusDiv.className = 'vtube-status vtube-disconnected';
+                vtubeConnected = false;
+            }
+        }
+
+        // Lip sync functions using VTube Studio
+        async function startLipSync() {
+            if (!vtubeConnected || !currentModelId) {
+                console.log('VTube Studio not connected or no model loaded');
+                return;
+            }
+            
+            try {
+                // Trigger mouth open parameter
+                await sendVTubeCommand({
+                    apiName: "VTubeStudioPublicAPI",
+                    apiVersion: "1.0",
+                    requestID: "lip_sync_start",
+                    messageType: "InjectParameterDataRequest",
+                    data: {
+                        faceFound: true,
+                        mode: "set",
+                        parameterValues: [
+                            {
+                                id: "ParamMouthOpenY",
+                                value: 1.0
+                            }
+                        ]
+                    }
+                });
+                console.log('Started lip sync animation');
+            } catch (error) {
+                console.error('Failed to start lip sync:', error);
+            }
+        }
+
+        async function stopLipSync() {
+            if (!vtubeConnected || !currentModelId) {
+                return;
+            }
+            
+            try {
+                // Close mouth
+                await sendVTubeCommand({
+                    apiName: "VTubeStudioPublicAPI",
+                    apiVersion: "1.0",
+                    requestID: "lip_sync_stop",
+                    messageType: "InjectParameterDataRequest",
+                    data: {
+                        faceFound: true,
+                        mode: "set",
+                        parameterValues: [
+                            {
+                                id: "ParamMouthOpenY",
+                                value: 0.0
+                            }
+                        ]
+                    }
+                });
+                console.log('Stopped lip sync animation');
+            } catch (error) {
+                console.error('Failed to stop lip sync:', error);
+            }
+        }
+
+        // Enhanced lip sync with audio analysis
+        async function animateLipSyncWithAudio(audioElement) {
+            if (!vtubeConnected) {
+                console.log('VTube Studio not connected - skipping lip sync');
+                return;
+            }
+            
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaElementSource(audioElement);
+                const analyser = audioContext.createAnalyser();
+                
+                source.connect(analyser);
+                analyser.connect(audioContext.destination);
+                
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                
+                const animate = () => {
+                    if (audioElement.paused || audioElement.ended) {
+                        stopLipSync();
+                        return;
+                    }
+                    
+                    analyser.getByteFrequencyData(dataArray);
+                    
+                    // Calculate average volume
+                    let sum = 0;
+                    for (let i = 0; i < bufferLength; i++) {
+                        sum += dataArray[i];
+                    }
+                    const average = sum / bufferLength;
+                    
+                    // Convert to mouth open value (0-1)
+                    const mouthOpen = Math.min(average / 100, 1.0);
+                    
+                    // Send to VTube Studio
+                    if (vtubeConnected) {
+                        sendVTubeCommand({
+                            apiName: "VTubeStudioPublicAPI",
+                            apiVersion: "1.0",
+                            requestID: "lip_sync_frame_" + Date.now(),
+                            messageType: "InjectParameterDataRequest",
+                            data: {
+                                faceFound: true,
+                                mode: "set",
+                                parameterValues: [
+                                    {
+                                        id: "ParamMouthOpenY",
+                                        value: mouthOpen
+                                    }
+                                ]
+                            }
+                        }).catch(error => {
+                            // Silently handle lip sync errors to avoid spam
+                            if (error.message !== 'VTube Studio command timeout') {
+                                console.error('Lip sync error:', error);
+                            }
+                        });
+                    }
+                    
+                    requestAnimationFrame(animate);
+                };
+                
+                animate();
+            } catch (error) {
+                console.error('Audio analysis error:', error);
+            }
         }
 
         // Keyboard shortcut to toggle setup panel
@@ -447,6 +736,17 @@
             if (e.ctrlKey && e.key === 'k') {
                 e.preventDefault();
                 toggleSetup();
+            }
+        });
+
+        // Try to reconnect to VTube Studio if we have a saved token
+        window.addEventListener('load', () => {
+            const savedToken = localStorage.getItem('vtubeToken');
+            if (savedToken) {
+                console.log('Found saved VTube Studio token, attempting reconnection...');
+                setTimeout(() => {
+                    connectVTubeStudio();
+                }, 1000);
             }
         });
     </script>
